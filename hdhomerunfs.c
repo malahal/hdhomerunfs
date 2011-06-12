@@ -1,3 +1,6 @@
+/*
+ * Fuse file system driver for HDHOMERUN network tuner.
+ */
 #define FUSE_USE_VERSION 26
 
 #include <fuse.h>
@@ -12,7 +15,13 @@
 #include <dirent.h>
 #include <stdlib.h>
 
-/* Read from a config file someday */
+#ifdef DEBUG
+#define debug(x) printf(x)
+#else
+#define debug(x)
+#endif
+
+/* TODO: Read from a config file someday */
 static char *save_file_name = "./hdhomerun_live.ts";
 static char *hdhomerun_id = "192.168.1.133";
 static char *hdhomerun_tuner = "1";
@@ -24,6 +33,16 @@ struct vchannel {
 	char *program;
 } vchannel;
 
+/*
+ * channel map:
+ *
+ * First entry is the channel file name that appears in the fuse FS.
+ * Second one is physical RF channel (or frequency) that channel
+ * 	value that hdhomerun_config takes.
+ * Third entry is the 'program' number in the above RF stream.
+ *
+ * The second and third fields are passed to hdhomerun_config
+ */
 static struct vchannel vchannels[] = {
 	{"/KATU-2.2.ts", "8vsb:43", "4"},
 	{"/KGW-8.1.ts",  "8vsb:8", "3"},
@@ -101,7 +120,6 @@ static int hdhr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	(void) fi;
 	int i;
 
-	printf("readdir: %s\n", path);
 	if (strcmp(path, "/") == 0) {
 		filler(buf, ".", NULL, 0);
 		filler(buf, "..", NULL, 0);
@@ -115,7 +133,7 @@ static int hdhr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int hdhr_open(const char *path, struct fuse_file_info *fi)
 {
-	printf("open called for path: %s\n", path);
+	debug(("open called for path: %s\n", path));
 	if (path_index(path) != NUM_VCHANNELS) { /* Channel file */
 	    return 0;
 	}
@@ -124,7 +142,7 @@ static int hdhr_open(const char *path, struct fuse_file_info *fi)
 
 static int hdhr_release(const char *path, struct fuse_file_info *fi)
 {
-	printf("close called for path: %s\n", path);
+	debug(("close called for path: %s\n", path));
 	if (path_index(path) != NUM_VCHANNELS) { /* Channel file */
 	    return 0;
 	}
@@ -157,14 +175,14 @@ static int hdhr_set_save(int index)
 
 	sprintf(cmd, "%s %s set /tuner%s/channel %s", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].channel);
-	printf("%s\n", cmd);
+	debug(("Executing: %s\n", cmd));
 	if (system(cmd) != 0) {
 		return 0;
 	}
 
 	sprintf(cmd, "%s %s set /tuner%s/program %s", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].program);
-	printf("%s\n", cmd);
+	debug(("Executing: %s\n", cmd));
 	if (system(cmd) != 0) {
 		return 0;
 	}
@@ -228,9 +246,9 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	save_size = save_file_size();
 	if (offset <= save_size) {
 		while (offset + size > save_size) {
-			printf("SLEEPING to grow - saved size: %llu, "
-					"offset: %llu, size: %zu\n",
-					save_size, offset, size);
+			debug(("SLEEPING to grow - saved size: %llu, "
+			       "offset: %llu, size: %zu\n",
+			       save_size, offset, size));
 			sleep(1);
 			save_size = save_file_size();
 		}
@@ -238,17 +256,17 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 
 	if (offset < save_size) {
 		if (offset + size > save_size) {
-			printf("Going to be a SHORT read - saved size: %llu, "
+			debug(("Going to be a SHORT read - saved size: %llu, "
 			       "offset: %llu, size: %zu\n",
-			       save_size, offset, size);
+			       save_size, offset, size));
 			size = save_size - offset;
 		}
 		lseek(save_file_fd, offset, SEEK_SET);
 		read(save_file_fd, buf, size);
 	} else {
-		printf("Going to be a FAKE read - saved size: %llu, "
+		debug(("Going to be a FAKE read - saved size: %llu, "
 		       "offset: %llu, size: %zu\n",
-		       save_size, offset, size);
+		       save_size, offset, size));
 		lseek(save_file_fd, 0, SEEK_SET);
 		size = read(save_file_fd, buf, size);
 	}
@@ -262,13 +280,13 @@ static void sig_handler(int signum)
 	off_t save_size;
 	static int old_read_counter;
 
-	printf("alarm handler called; old: %d, new: %d\n",
-	       old_read_counter, read_counter);
+	debug(("alarm handler called; old: %d, new: %d\n",
+	       old_read_counter, read_counter));
 
 	if (read_counter == old_read_counter) {
 		/* No reads since the last alarm */
 		if (save_process_pid != -1) {
-			printf("killing pid: %d\n", save_process_pid);
+			debug(("killing pid: %d\n", save_process_pid));
 			kill(save_process_pid, SIGKILL);
 			save_process_pid = -1;
 		}
@@ -302,7 +320,7 @@ static void *hdhr_init(struct fuse_conn_info *conn)
 
 static void hdhr_destroy(void *arg)
 {
-	printf("destroy called\n");
+	debug(("destroy called\n"));
 	if (save_process_pid != -1) {
 		kill(save_process_pid, SIGKILL);
 		save_process_pid = -1;
