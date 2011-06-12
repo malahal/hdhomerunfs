@@ -158,28 +158,37 @@ static int hdhr_set_save(int index)
 	sprintf(cmd, "%s %s set /tuner%s/channel %s", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].channel);
 	printf("%s\n", cmd);
-	system(cmd);
+	if (system(cmd) != 0) {
+		return 0;
+	}
 
 	sprintf(cmd, "%s %s set /tuner%s/program %s", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].program);
 	printf("%s\n", cmd);
-	system(cmd);
+	if (system(cmd) != 0) {
+		return 0;
+	}
 
 	if (save_file_fd < 0) {
 		save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
-		printf("opened save file\n");
+		if (save_file_fd < 0) {
+			return 0;
+		}
 	}
 
 	if (save_process_pid != -1) {
 		kill(save_process_pid, SIGKILL);
 		save_process_pid = -1;
 	}
-	printf("calling hdhomerun_config save\n");
+
 	ftruncate(save_file_fd, 0);
 	save_process_pid = hdhomerun_save();
+	if (save_process_pid == -1) {
+		return 0;
+	}
 	last_open_file_index = index;
 
-	return 0;
+	return 1;
 }
 
 off_t save_file_size(void)
@@ -211,6 +220,10 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		hdhr_set_save(index);
 	}
 	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
+
+	if (save_process_pid == -1) {
+		return -EIO;
+	}
 
 	save_size = save_file_size();
 	if (offset <= save_size) {
@@ -308,5 +321,31 @@ static struct fuse_operations hdhr_ops = {
 
 int main(int argc, char *argv[])
 {
+	int i, found = 0;
+	char **new_argv;
+
+	/*
+	 * If single threaded option (-s) is not passed, add it here
+	 * as we fail to work in multi-threaded environment.
+	 */
+	for (i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "-s") == 0) {
+			found = 1;
+			break;
+		}
+	}
+
+	if (!found) { /* add -s option as the first one */
+		new_argv = malloc((argc+2) * sizeof(char *));
+		if (!new_argv) {
+			exit(1);
+		}
+		new_argv[0] = argv[0];
+		new_argv[1] = "-s";
+		memcpy(&new_argv[2], &argv[1], sizeof(char *) * argc);
+		argc++;
+		argv = new_argv;
+	}
+
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
 }
