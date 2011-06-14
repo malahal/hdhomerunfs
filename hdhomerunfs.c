@@ -68,6 +68,7 @@ static int save_file_fd = -1;
 static int save_process_pid = -1;
 static int last_open_file_index = -1;
 static int read_counter = 0;
+static int debug = 0;
 
 #define MAX_FILE_SIZE (8 * 1024 * 1024 * 1024ULL)
 
@@ -339,30 +340,44 @@ static struct fuse_operations hdhr_ops = {
 
 int main(int argc, char *argv[])
 {
-	int i, found = 0;
-	char **new_argv;
+	char *conffile, *mountpoint;
+	int i, single_threaded = 0;
+	char opt;
 
 	/*
 	 * If single threaded option (-s) is not passed, add it here
-	 * as we fail to work in multi-threaded environment.
+	 * as we fail to work in multi-threaded environment. -d option
+	 * is for debugging, so change it to -f before passing them
+	 * to fuse.
+	 *
+	 * All the options should come first. Non option arguments are
+	 * the config file name and mount point.
 	 */
-	for (i = 0; i < argc; i++) {
-		if (strcmp(argv[i], "-s") == 0) {
-			found = 1;
-			break;
+	for (i = 1; i < argc && argv[i][0] == '-'; i++) {
+		opt = argv[i][1];
+		if (opt == 'o') {
+			i++; /* -o takes a parameter */
+		} else if (opt == 's') {
+			single_threaded = 1;
+		} else if (opt == 'd') {
+			debug = 1;
+			argv[i][1] = 'f'; /* Change it to foreground!!! */
 		}
 	}
 
-	if (!found) { /* add -s option as the first one */
-		new_argv = malloc((argc+2) * sizeof(char *));
-		if (!new_argv) {
-			exit(1);
-		}
-		new_argv[0] = argv[0];
-		new_argv[1] = "-s";
-		memcpy(&new_argv[2], &argv[1], sizeof(char *) * argc);
-		argc++;
-		argv = new_argv;
+	if ((argc -i) != 2) {
+		fprintf(stderr, "%s [options] conffile mountpoint\n",
+			argv[0]);
+		exit(1);
+	}
+
+	conffile = argv[i];
+	mountpoint = argv[i+1];
+	if (!single_threaded) {
+		argv[i] = "-s";
+	} else {
+		argv[i] = mountpoint;
+		argv[i+1] = NULL;
 	}
 
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
