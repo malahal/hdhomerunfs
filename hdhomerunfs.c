@@ -17,15 +17,9 @@
 
 /* TODO: Read from a config file someday */
 static char *save_file_name = "./hdhomerun_live.ts";
-static char *hdhomerun_id = "192.168.1.133";
-static char *hdhomerun_tuner = "1";
-static char *hdhomerun_config = "./hdhomerun_config";
-
-struct vchannel {
-	char *name;
-	char *channel;
-	char *program;
-} vchannel;
+static char *hdhomerun_config;
+static int hdhomerun_tuner;
+static char *hdhomerun_id;
 
 /*
  * channel map:
@@ -37,21 +31,14 @@ struct vchannel {
  *
  * The second and third fields are passed to hdhomerun_config
  */
-static struct vchannel vchannels[] = {
-	{"/KATU-2.2.ts", "8vsb:43", "4"},
-	{"/KGW-8.1.ts",  "8vsb:8", "3"},
-	{"/WEATHER-8.2.ts",  "8vsb:8", "4"},
+struct vchannel {
+	char *name;
+	char *channel;
+	char program;
+} vchannel;
 
-	{"/OPB-10.2.ts", "8vsb:10", "4"},
-	{"/OPB-Plus-10.2.ts", "8vsb:10", "5"},
-	{"/OPB-FM-10.4.ts", "8vsb:10", "6"},
-
-	{"/QUBO-22.2.ts", "8vsb:22", "4"},
-
-	{"/KPDX-49.1.ts", "8vsb:30", "3"},
-	{"/KPTV-12.1.ts", "8vsb:12", "3"},
-};
-#define NUM_VCHANNELS (sizeof(vchannels)/sizeof(vchannels[0]))
+static struct vchannel *vchannels;
+static int num_vchannels;
 
 /**************************************************************************/
 /************ END OF CONFIG DATA ******************************************/
@@ -70,7 +57,7 @@ static int path_index(const char *path)
 {
 	int i;
 
-	for (i = 0; i < NUM_VCHANNELS; i++) {
+	for (i = 0; i < num_vchannels; i++) {
 		if (strcmp(path, vchannels[i].name) == 0) {
 			break;
 		}
@@ -96,11 +83,11 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 	if (index == last_open_file_index) {
 		/* TODO: Just fake it like below and avoid a stat ??? */
 		stat(save_file_name, stbuf);
-		stbuf->st_size = 2 * MAX_FILE_SIZE;
-	} else if (index != NUM_VCHANNELS) {
+		stbuf->st_size = 3 * MAX_FILE_SIZE;
+	} else if (index != num_vchannels) {
 		stbuf->st_mode = S_IFREG | 0444;
 		stbuf->st_nlink = 1;
-		stbuf->st_size = 2 * MAX_FILE_SIZE;
+		stbuf->st_size = 3 * MAX_FILE_SIZE;
 	} else {
 		res = -ENOENT;
 	}
@@ -118,7 +105,7 @@ static int hdhr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	if (strcmp(path, "/") == 0) {
 		filler(buf, ".", NULL, 0);
 		filler(buf, "..", NULL, 0);
-		for (i = 0; i < NUM_VCHANNELS; i++) {
+		for (i = 0; i < num_vchannels; i++) {
 			filler(buf, vchannels[i].name + 1, NULL, 0);
 		}
 	}
@@ -131,7 +118,7 @@ static int hdhr_open(const char *path, struct fuse_file_info *fi)
 	if (debug) {
 		printf("open called for path: %s\n", path);
 	}
-	if (path_index(path) != NUM_VCHANNELS) { /* Channel file */
+	if (path_index(path) != num_vchannels) { /* Channel file */
 	    return 0;
 	}
 	return -ENOENT;
@@ -142,7 +129,7 @@ static int hdhr_release(const char *path, struct fuse_file_info *fi)
 	if (debug) {
 		printf("close called for path: %s\n", path);
 	}
-	if (path_index(path) != NUM_VCHANNELS) { /* Channel file */
+	if (path_index(path) != num_vchannels) { /* Channel file */
 	    return 0;
 	}
 	return -ENOENT;
@@ -155,7 +142,7 @@ static pid_t hdhomerun_save(void)
 
 	pid = fork();
 	if (pid == 0) { /* Child */
-		sprintf(tuner, "/tuner%s", hdhomerun_tuner);
+		sprintf(tuner, "/tuner%d", hdhomerun_tuner);
 		if (execl(hdhomerun_config, hdhomerun_config, hdhomerun_id,
 			  "save", tuner, save_file_name, (char *)NULL) == -1) {
 			/* TODO */
@@ -172,7 +159,7 @@ static int hdhr_set_save(int index)
 {
 	char cmd[100];
 
-	sprintf(cmd, "%s %s set /tuner%s/channel %s", hdhomerun_config,
+	sprintf(cmd, "%s %s set /tuner%d/channel %s", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].channel);
 	if (debug) {
 		printf("Executing: %s\n", cmd);
@@ -181,7 +168,7 @@ static int hdhr_set_save(int index)
 		return 0;
 	}
 
-	sprintf(cmd, "%s %s set /tuner%s/program %s", hdhomerun_config,
+	sprintf(cmd, "%s %s set /tuner%d/program %d", hdhomerun_config,
 	        hdhomerun_id, hdhomerun_tuner, vchannels[index].program);
 	if (debug) {
 		printf("Executing: %s\n", cmd);
@@ -223,12 +210,12 @@ off_t save_file_size(void)
 }
 
 static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
-		      struct fuse_file_info *fi)
+		     struct fuse_file_info *fi)
 {
 	size_t len;
 	(void) fi;
 	off_t save_size;
-	int index;
+	int index, retry;
 	sigset_t sigset;
 
 	index = path_index(path);
@@ -248,7 +235,8 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 
 	save_size = save_file_size();
 	if (offset <= save_size) {
-		while (offset + size > save_size) {
+		retry = 5;
+		while (offset + size > save_size && retry--) {
 			if (debug) {
 				printf("SLEEPING to grow - saved size: %llu, "
 				       "offset: %llu, size: %zu\n",
@@ -270,8 +258,9 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 			size = save_size - offset;
 		}
 		lseek(save_file_fd, offset, SEEK_SET);
-		read(save_file_fd, buf, size);
-	} else {
+		size = read(save_file_fd, buf, size);
+	} else if (offset > 2 * MAX_FILE_SIZE) {
+		/* Some players read at the end of the file */
 		if (debug) {
 			printf("Going to be a FAKE read - saved size: %llu, "
 			       "offset: %llu, size: %zu\n",
@@ -279,6 +268,8 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		}
 		lseek(save_file_fd, 0, SEEK_SET);
 		size = read(save_file_fd, buf, size);
+	} else {
+		size = 0; /* Reached end of the file really! */
 	}
 
 	return size;
@@ -353,6 +344,73 @@ static struct fuse_operations hdhr_ops = {
 	.destroy        = hdhr_destroy,
 };
 
+static void add_channel(char *vchannel, char *pchannel, char *program,
+			char *name)
+{
+	struct vchannel *channel;
+	char channel_name[100];
+
+	vchannels = realloc(vchannels, sizeof(struct vchannel) *
+			    (num_vchannels + 1));
+	channel = &vchannels[num_vchannels];
+	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", name,
+		 vchannel);
+	channel->name = strdup(channel_name);
+	channel->channel = strdup(pchannel);
+	channel->program = atoi(program);
+	num_vchannels++;
+}
+
+#define MAXLINE 100
+static void read_config(const char *conffile)
+{
+	FILE *fp;
+	char line[MAXLINE];
+	char buf[MAXLINE];
+	char *token;
+	char *vchannel, *pchannel, *program, *name;
+
+	fp = fopen(conffile, "r");
+	if (fp == NULL) {
+		fprintf(stderr, "fopen of %s failed: %s\n", conffile,
+		       strerror(errno));
+		exit(1);
+	}
+	while (fgets(line, sizeof(buf), fp) != NULL) {
+		strcpy(buf, line);
+		token = strtok(buf, " \t\n");
+		if (token == NULL) {
+			continue;
+		} else if (token[0] == '#' || token[0] == ';') {
+			continue;
+		} else if (strcmp(token, "[global]") == 0) {
+			continue;
+		} else if (strcmp(token, "[channelmap]") == 0) {
+			continue;
+		} else if (strcmp(token, "hdhomerun_config") == 0) {
+			hdhomerun_config = strdup(strtok(NULL, "= \t\n"));
+		} else if (strcmp(token, "tuners") == 0) {
+			hdhomerun_id = strdup(strtok(NULL, "=: \t\n"));
+			hdhomerun_tuner = atoi(strtok(NULL, ":, \t\n"));
+		} else {
+			vchannel = token;
+			pchannel = strtok(NULL, "= \t");
+			program = strtok(NULL, " \t");
+			name = strtok(NULL, " \t\n");
+			if (!vchannel || !pchannel || !program || !name) {
+				fprintf(stderr, "incorrect syntax in file %s "
+					"line: %s\n", conffile, line);
+			} else if (atoi(program) == 0) {
+				fprintf(stderr, "incorrect channel program: "
+					"%s, in file %s line: %s\n", program,
+					conffile, line);
+			}
+			printf("adding: %s %s %s %s\n", vchannel, pchannel, program, name);
+			add_channel(vchannel, pchannel, program, name);
+		}
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	char *conffile, *mountpoint;
@@ -380,7 +438,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if ((argc -i) != 2) {
+	if ((argc - i) != 2) {
 		fprintf(stderr, "%s [options] conffile mountpoint\n",
 			argv[0]);
 		exit(1);
@@ -391,9 +449,11 @@ int main(int argc, char *argv[])
 	if (!single_threaded) {
 		argv[i] = "-s";
 	} else {
-		argv[i] = mountpoint;
+		argv[i] = argv[i+1]; /* remove conffile arg */
 		argv[i+1] = NULL;
+		argc--;
 	}
 
+	read_config(conffile);
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
 }

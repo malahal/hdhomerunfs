@@ -1,0 +1,3 @@
+Provides FUSE file system for HDHOMERUN network tuner. The channels
+appear as files under the FUSE mount point and any player can be used to
+play the files.
