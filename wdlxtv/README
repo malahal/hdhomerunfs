@@ -1,0 +1,23 @@
+Provides FUSE file system for HDHOMERUN network tuner. The channels
+appear as files under the FUSE mount point and any player can be used to
+play the files.
+
+WDLXTV hdhomerunfs.app.bin instructions.
+
+1. Copy the app.bin to your hard drive
+2. Reboot your WDLXTV player
+3. Modify the config file (/apps/hdhomerunfs/conf/hdhomerunfs.ini) to apply
+   for your device
+
+   a) Add your hdhometuner device id and tuner number you want to use
+   b) Add your channel mappings.
+
+4. Set the file name for saving the stream in /conf/config. Needs at
+   least 8GB space in that file system!!! Example:
+
+   config_tool -c HDHOMERUN_SAVE_FILE=/tmp/media/usb/USB1/uuid/hdhomerunfs_save_file
+   config_tool -s
+   config_tool -s
+
+5. Restart the app or just reboot the player
+   /apps/hdhomerunfs/etc/init.d/S99hdhomerunfs start

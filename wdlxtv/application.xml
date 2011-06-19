@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<application>
+        <name>hdhomerunfs</name>
+        <desc> hdhomerunfs is a FUSE based filesystem that presents
+              tuner channels as files.</desc>
+        <author>Malahal Naineni</author>
+        <date>2011-06-14</date>
+        <version>0.1</version>
+        <url>http://forum.wdlxtv.com/viewtopic.php?f=17&amp;t=4530</url>
+    <size>458752</size>
+    <format>ext3</format>
+    <provides>
+        <binary>true</binary>
+        <daemon>false</daemon>
+        <kernelmodule>false</kernelmodule>
+        <webend>false</webend>
+    </provides>
+    <dependencies>
+        <model>LIVE</model>
+        <basefirmware>
+            <min>1.02.21</min>
+            <max>1.02.21</max>
+        </basefirmware>
+        <firmware>
+            <min>0.4.3.1</min>
+            <max></max>
+        </firmware>
+        <wdtvext>false</wdtvext>
+        <network>false</network>
+        <config></config>
+        <app></app>
+    </dependencies>
+    <id>hdhomerunfs</id>
+    <download>hdhomerunfs.app.bin</download>
+</application>
