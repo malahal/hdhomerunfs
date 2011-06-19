@@ -15,12 +15,6 @@
 #include <dirent.h>
 #include <stdlib.h>
 
-/* TODO: Read from a config file someday */
-static char *save_file_name = "./hdhomerun_live.ts";
-static char *hdhomerun_config;
-static int hdhomerun_tuner;
-static char *hdhomerun_id;
-
 /*
  * channel map:
  *
@@ -37,21 +31,36 @@ struct vchannel {
 	char program;
 } vchannel;
 
+/* Globals */
 static struct vchannel *vchannels;
 static int num_vchannels;
-
-/**************************************************************************/
-/************ END OF CONFIG DATA ******************************************/
-/**************************************************************************/
-
-/* Globals */
+static char *save_file_name;
+static char *hdhomerun_config;
+static int hdhomerun_tuner;
+static char *hdhomerun_id;
 static int save_file_fd = -1;
 static int save_process_pid = -1;
 static int last_open_file_index = -1;
 static int read_counter = 0;
 static int debug = 0;
 
+
+/*
+ * Some players notably WDTV Live media player reads 10MB at the end of
+ * a file before starting the play. We set the channel file size to
+ * MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE.
+ *
+ * Any read upto MAX_FILE_SIZE is real and we wait for the save_file to grow.
+ * Any read from MAX_FILE_SIZE to MAX_FILE_SIZE+ZERO_SIZE is returned zeros.
+ * Any read from MAX_FILE_SIZE+ZERO_SIZE and beyond is a FAKE read and
+ * returned with the first part of the file!
+ *
+ * FAKE_SIZE should be at least 10MB for WDTV Live, but we make it 100MB
+ * here!
+ */
 #define MAX_FILE_SIZE (8 * 1024 * 1024 * 1024ULL)
+#define ZERO_SIZE (100 * 1024 * 1024ull)
+#define FAKE_SIZE (100 * 1024 * 1024ULL)
 
 static int path_index(const char *path)
 {
@@ -83,11 +92,11 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 	if (index == last_open_file_index) {
 		/* TODO: Just fake it like below and avoid a stat ??? */
 		stat(save_file_name, stbuf);
-		stbuf->st_size = 3 * MAX_FILE_SIZE;
+		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
 	} else if (index != num_vchannels) {
 		stbuf->st_mode = S_IFREG | 0444;
 		stbuf->st_nlink = 1;
-		stbuf->st_size = 3 * MAX_FILE_SIZE;
+		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
 	} else {
 		res = -ENOENT;
 	}
@@ -143,8 +152,8 @@ static pid_t hdhomerun_save(void)
 	pid = fork();
 	if (pid == 0) { /* Child */
 		sprintf(tuner, "/tuner%d", hdhomerun_tuner);
-		if (execl(hdhomerun_config, hdhomerun_config, hdhomerun_id,
-			  "save", tuner, save_file_name, (char *)NULL) == -1) {
+		if (execlp(hdhomerun_config, hdhomerun_config, hdhomerun_id,
+			   "save", tuner, save_file_name, (char *)NULL) == -1) {
 			/* TODO */
 		}
 	} else if (pid != -1) { /* Parent */
@@ -233,9 +242,9 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		return -EIO;
 	}
 
-	save_size = save_file_size();
-	if (offset <= save_size) {
-		retry = 5;
+	if (offset < MAX_FILE_SIZE) {
+		retry = 5; /* limit the wait */
+		save_size = save_file_size();
 		while (offset + size > save_size && retry--) {
 			if (debug) {
 				printf("SLEEPING to grow - saved size: %llu, "
@@ -259,8 +268,8 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		}
 		lseek(save_file_fd, offset, SEEK_SET);
 		size = read(save_file_fd, buf, size);
-	} else if (offset > 2 * MAX_FILE_SIZE) {
-		/* Some players read at the end of the file */
+	} else if (offset >= MAX_FILE_SIZE + ZERO_SIZE) {
+		/* FAKE region */
 		if (debug) {
 			printf("Going to be a FAKE read - saved size: %llu, "
 			       "offset: %llu, size: %zu\n",
@@ -269,6 +278,10 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		lseek(save_file_fd, 0, SEEK_SET);
 		size = read(save_file_fd, buf, size);
 	} else {
+		/* 
+		 * This is either ZERO region read or we could not wait
+		 * for the actual data to materialize.
+		 */
 		size = 0; /* Reached end of the file really! */
 	}
 
@@ -362,7 +375,7 @@ static void add_channel(char *vchannel, char *pchannel, char *program,
 }
 
 #define MAXLINE 100
-static void read_config(const char *conffile)
+static int read_config(const char *conffile)
 {
 	FILE *fp;
 	char line[MAXLINE];
@@ -400,14 +413,21 @@ static void read_config(const char *conffile)
 			if (!vchannel || !pchannel || !program || !name) {
 				fprintf(stderr, "incorrect syntax in file %s "
 					"line: %s\n", conffile, line);
+				return 0;
 			} else if (atoi(program) == 0) {
 				fprintf(stderr, "incorrect channel program: "
 					"%s, in file %s line: %s\n", program,
 					conffile, line);
+				return 0;
 			}
-			printf("adding: %s %s %s %s\n", vchannel, pchannel, program, name);
 			add_channel(vchannel, pchannel, program, name);
 		}
+	}
+
+	if (hdhomerun_config && hdhomerun_id) {
+		return 1;
+	} else {
+		return 0;
 	}
 }
 
@@ -430,30 +450,40 @@ int main(int argc, char *argv[])
 		opt = argv[i][1];
 		if (opt == 'o') {
 			i++; /* -o takes a parameter */
-		} else if (opt == 's') {
-			single_threaded = 1;
-		} else if (opt == 'd') {
+		} else if (opt == 'd') { /* Our debug option */
 			debug = 1;
 			argv[i][1] = 'f'; /* Change it to foreground!!! */
 		}
 	}
 
-	if ((argc - i) != 2) {
-		fprintf(stderr, "%s [options] conffile mountpoint\n",
+	if ((argc - i) != 3) {
+		fprintf(stderr, "%s [options] savefile conffile mountpoint\n",
 			argv[0]);
 		exit(1);
 	}
 
-	conffile = argv[i];
-	mountpoint = argv[i+1];
-	if (!single_threaded) {
-		argv[i] = "-s";
-	} else {
-		argv[i] = argv[i+1]; /* remove conffile arg */
-		argv[i+1] = NULL;
-		argc--;
+	save_file_name = argv[i];
+	conffile = argv[i+1];
+	mountpoint = argv[i+2];
+
+	/*
+	 * We could move argv pointers around, but duplicate
+	 * options work fine with fuse, so just replace
+	 * the savefile and conffile args with "-s" option
+	 * as we need single threaded event loop.
+	 */
+	argv[i] = "-s";
+	argv[i+1] = "-s";
+
+	if (fopen(save_file_name, "w") == NULL) {
+		fprintf(stderr, "Can't open %s file for writing: %s\n",
+			save_file_name, strerror(errno));
+		exit(2);
+	}
+	if (!read_config(conffile)) {
+		fprintf(stderr, "error in config file, please fix it\n");
+		exit(2);
 	}
 
-	read_config(conffile);
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
 }
