@@ -76,6 +76,11 @@ static int path_index(const char *path)
 	return i;
 }
 
+static int channel_file(const char *path)
+{
+	return path_index(path) != num_vchannels;
+}
+
 static int hdhr_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
@@ -83,7 +88,7 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 
 	memset(stbuf, 0, sizeof(struct stat));
 	if (strcmp(path, "/") == 0) {
-		stbuf->st_mode = S_IFDIR | 0755;
+		stbuf->st_mode = S_IFDIR | 0555;
 		stbuf->st_nlink = 2;
 		return 0;
 	}
@@ -128,7 +133,7 @@ static int hdhr_open(const char *path, struct fuse_file_info *fi)
 	if (debug) {
 		printf("open called for path: %s\n", path);
 	}
-	if (path_index(path) != num_vchannels) { /* Channel file */
+	if (channel_file(path)) {
 	    return 0;
 	}
 	return -ENOENT;
@@ -139,7 +144,7 @@ static int hdhr_release(const char *path, struct fuse_file_info *fi)
 	if (debug) {
 		printf("close called for path: %s\n", path);
 	}
-	if (path_index(path) != num_vchannels) { /* Channel file */
+	if (channel_file(path)) {
 	    return 0;
 	}
 	return -ENOENT;
