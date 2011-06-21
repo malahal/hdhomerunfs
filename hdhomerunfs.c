@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 
 /*
  * channel map:
@@ -195,6 +196,7 @@ static int hdhr_set_save(int index)
 
 	if (save_process_pid != -1) {
 		kill(save_process_pid, SIGKILL);
+		waitpid(save_process_pid, NULL, 0);
 		save_process_pid = -1;
 	}
 
@@ -306,6 +308,7 @@ static void sig_handler(int signum)
 				printf("killing pid: %d\n", save_process_pid);
 			}
 			kill(save_process_pid, SIGKILL);
+			waitpid(save_process_pid, NULL, 0);
 			save_process_pid = -1;
 		}
 	}
@@ -343,6 +346,7 @@ static void hdhr_destroy(void *arg)
 	}
 	if (save_process_pid != -1) {
 		kill(save_process_pid, SIGKILL);
+		waitpid(save_process_pid, NULL, 0);
 		save_process_pid = -1;
 	}
 }
