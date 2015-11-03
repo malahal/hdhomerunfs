@@ -29,7 +29,7 @@
 struct vchannel {
 	char *name;
 	char *channel;
-	char program;
+	int  program;
 } vchannel;
 
 /* Globals */
@@ -379,7 +379,7 @@ static void add_channel(char *vchannel, char *pchannel, char *program,
 		 name);
 	channel->name = strdup(channel_name);
 	channel->channel = strdup(pchannel);
-	channel->program = atoi(program);
+	channel->program = strtol(program, NULL, 10);
 	num_vchannels++;
 }
 
