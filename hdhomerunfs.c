@@ -39,7 +39,8 @@ static char *save_file_name;
 static int hdhomerun_tuner;
 static char *hdhomerun_id;
 static int save_file_fd = -1;
-static int save_process_pid = -1;
+static pthread_t save_process_thread;
+static int save_thread_running = 0;
 static int last_open_file_index = -1;
 static int read_counter = 0;
 static int debug = 0;
@@ -149,14 +150,10 @@ static int hdhr_release(const char *path, struct fuse_file_info *fi)
 	return -ENOENT;
 }
 
-static pid_t hdhomerun_save(void)
+static void *hdhomerun_save(void *edata)
 {
-	pid_t pid;
 	struct hdhomerun_device_t *hd;
 	char tuner[10] = {0};
-
-	pid = fork();
-	if (pid == 0) { /* Child */
 
 	hd = hdhomerun_device_create_from_str(hdhomerun_id, NULL);
 	sprintf(tuner, "%d", hdhomerun_tuner);
@@ -171,7 +168,7 @@ static pid_t hdhomerun_save(void)
 		return NULL;
 	}
 	/* loop */
-	while (1) {
+	while (save_thread_running) {
 		size_t actual_size;
 		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
 		if (ptr) {
@@ -186,13 +183,24 @@ static pid_t hdhomerun_save(void)
 	hdhomerun_device_stream_stop(hd);
 	hdhomerun_device_destroy(hd);
 
-	} else if (pid != -1) { /* Parent */
-		return pid;
-	} else {
-		return -1;
-	}
+	fprintf(stderr, "save thread exiting...\n");
+	pthread_exit(NULL);
+
+	return NULL;
 }
 
+static int spawn_thread(void *(*func)(void *), pthread_t *thread_id, void *edata) {
+	pthread_attr_t attr;
+	int result = 0;
+
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+	if (0 != pthread_create(thread_id, &attr, func, edata)) {
+		result = -1;
+	}
+	return result;
+}
 
 /* helper function to set device parameters */
 static int hdhr_set(struct hdhomerun_device_t *hd, char *item, char *value)
@@ -207,6 +215,7 @@ static int hdhr_set(struct hdhomerun_device_t *hd, char *item, char *value)
 		fprintf(stderr, "%s\n", ret_error);
 		return 0;
 	}
+
 	return 1;
 }
 
@@ -250,25 +259,27 @@ static int hdhr_set_save(int index)
 	}
 
 	if (save_file_fd < 0) {
-					save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
-					if (save_file_fd < 0) {
-									return 0;
-					}
+		save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
+		if (save_file_fd < 0) {
+			return 0;
+		}
 	}
 
 	hdhomerun_device_destroy(hd);
 
-	if (save_process_pid != -1) {
-		kill(save_process_pid, SIGKILL);
-		waitpid(save_process_pid, NULL, 0);
-		save_process_pid = -1;
+	if (save_thread_running) {
+		fprintf(stderr, "need to kill save thread %x\n", save_process_thread);
+		save_thread_running = 0;
+		int join_ret = pthread_join(save_process_thread, NULL);
+		fprintf(stderr, "got %d from join\n", join_ret);
 	}
 
 	ftruncate(save_file_fd, 0);
-	save_process_pid = hdhomerun_save();
-	if (save_process_pid == -1) {
+
+	if (spawn_thread(hdhomerun_save, &save_process_thread, NULL) < 0) {
 		return 0;
 	}
+	save_thread_running = 1;
 	last_open_file_index = index;
 
 	return 1;
@@ -299,12 +310,12 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	sigaddset(&sigset, SIGALRM);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
 	read_counter++;
-	if (save_process_pid == -1 || last_open_file_index != index) {
+	if (save_thread_running < 1 || last_open_file_index != index) {
 		hdhr_set_save(index);
 	}
 	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
 
-	if (save_process_pid == -1) {
+	if (save_thread_running < 1) {
 		return -EIO;
 	}
 
@@ -367,13 +378,12 @@ static void sig_handler(int signum)
 
 	if (read_counter == old_read_counter) {
 		/* No reads since the last alarm */
-		if (save_process_pid != -1) {
-			if (debug) {
-				printf("killing pid: %d\n", save_process_pid);
-			}
-			kill(save_process_pid, SIGKILL);
-			waitpid(save_process_pid, NULL, 0);
-			save_process_pid = -1;
+		if (debug) {
+			printf("stopping save thread\n");
+		}
+		if (save_thread_running) {
+			save_thread_running = 0;
+			pthread_join(save_process_thread, NULL);
 		}
 	}
 	old_read_counter = read_counter;
@@ -406,12 +416,11 @@ static void *hdhr_init(struct fuse_conn_info *conn)
 static void hdhr_destroy(void *arg)
 {
 	if (debug) {
-		printf("destroy called\n");
+		printf("exiting....\n");
 	}
-	if (save_process_pid != -1) {
-		kill(save_process_pid, SIGKILL);
-		waitpid(save_process_pid, NULL, 0);
-		save_process_pid = -1;
+	if (save_thread_running) {		
+		save_thread_running = 0;
+		pthread_join(save_process_thread, NULL);
 	}
 }
 
