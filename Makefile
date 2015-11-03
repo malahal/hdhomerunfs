@@ -12,7 +12,7 @@ SOURCES=\
 ./deps/hdhomerun/hdhomerun_video.c \
 
 
-CFLAGS   = -g -std=c99 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -Wpointer-arith
+CFLAGS   = -g -std=c99 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -Wpointer-arith -Ideps/
 LDFLAGS  = -lm -lpthread -lrt -lfuse
 
 OBJECTS=$(SOURCES:%.c=%.o)
