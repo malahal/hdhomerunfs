@@ -375,8 +375,8 @@ static void add_channel(char *vchannel, char *pchannel, char *program,
 	vchannels = realloc(vchannels, sizeof(struct vchannel) *
 			    (num_vchannels + 1));
 	channel = &vchannels[num_vchannels];
-	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", name,
-		 vchannel);
+	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", vchannel,
+		 name);
 	channel->name = strdup(channel_name);
 	channel->channel = strdup(pchannel);
 	channel->program = atoi(program);
