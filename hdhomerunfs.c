@@ -16,15 +16,15 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 
+#include "hdhomerun/hdhomerun.h"
+
 /*
  * channel map:
  *
  * First entry is the channel file name that appears in the fuse FS.
- * Second one is physical RF channel (or frequency) that channel
- * 	value that hdhomerun_config takes.
+ * Second one is physical the RF channel (or frequency) 
  * Third entry is the 'program' number in the above RF stream.
  *
- * The second and third fields are passed to hdhomerun_config
  */
 struct vchannel {
 	char *name;
@@ -36,7 +36,6 @@ struct vchannel {
 static struct vchannel *vchannels;
 static int num_vchannels;
 static char *save_file_name;
-static char *hdhomerun_config;
 static int hdhomerun_tuner;
 static char *hdhomerun_id;
 static int save_file_fd = -1;
@@ -153,15 +152,40 @@ static int hdhr_release(const char *path, struct fuse_file_info *fi)
 static pid_t hdhomerun_save(void)
 {
 	pid_t pid;
-	char tuner[10];
+	struct hdhomerun_device_t *hd;
+	char tuner[10] = {0};
 
 	pid = fork();
 	if (pid == 0) { /* Child */
-		sprintf(tuner, "/tuner%d", hdhomerun_tuner);
-		if (execlp(hdhomerun_config, hdhomerun_config, hdhomerun_id,
-			   "save", tuner, save_file_name, (char *)NULL) == -1) {
-			/* TODO */
+
+	hd = hdhomerun_device_create_from_str(hdhomerun_id, NULL);
+	sprintf(tuner, "%d", hdhomerun_tuner);
+	if (hdhomerun_device_set_tuner_from_str(hd, tuner) <= 0) {
+		fprintf(stderr, "invalid tuner number\n");
+		return NULL;
+	}
+
+	int ret = hdhomerun_device_stream_start(hd);
+	if (ret <= 0) {
+		fprintf(stderr, "unable to start stream\n");
+		return NULL;
+	}
+	/* loop */
+	while (1) {
+		size_t actual_size;
+		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
+		if (ptr) {
+			FILE *out = fopen(save_file_name, "a+");
+			int ret = fwrite(ptr, actual_size, 1, out);
+			fclose(out);
 		}
+		usleep(64000);
+	}
+
+	/* cleanup */
+	hdhomerun_device_stream_stop(hd);
+	hdhomerun_device_destroy(hd);
+
 	} else if (pid != -1) { /* Parent */
 		return pid;
 	} else {
@@ -169,35 +193,70 @@ static pid_t hdhomerun_save(void)
 	}
 }
 
+
+/* helper function to set device parameters */
+static int hdhr_set(struct hdhomerun_device_t *hd, char *item, char *value)
+{
+	char *ret_error;
+	if (hdhomerun_device_set_var(hd, item, value, NULL, &ret_error) < 0) {
+		fprintf(stderr, "communication error sending request to hdhomerun device\n");
+		return -1;
+	}
+
+	if (ret_error) {
+		fprintf(stderr, "%s\n", ret_error);
+		return 0;
+	}
+	return 1;
+}
+
 /* This function must be run while blocking ALARM signal */
 static int hdhr_set_save(int index)
 {
-	char cmd[100];
+	char item[100];
+	char value[100];
+	char *ret_error;
 
-	sprintf(cmd, "%s %s set /tuner%d/channel %s", hdhomerun_config,
-	        hdhomerun_id, hdhomerun_tuner, vchannels[index].channel);
-	if (debug) {
-		printf("Executing: %s\n", cmd);
+	struct hdhomerun_device_t *hd;
+	const char *model;
+
+	hd = hdhomerun_device_create_from_str(hdhomerun_id, NULL);
+	model = hdhomerun_device_get_model_str(hd);
+	if (!model) {
+		fprintf(stderr, "unable to connect to device\n");
+		hdhomerun_device_destroy(hd);
+		return 0;
 	}
-	if (system(cmd) != 0) {
+	if (debug) {
+		fprintf(stderr, "found hdhr model: %s\n", model);
+	}
+
+	sprintf(item, "/tuner%d/channel", hdhomerun_tuner);
+	sprintf(value, "8vsb:%s", vchannels[index].channel);
+	if (debug) {
+		printf("Executing: %s:%s\n", item, value);
+	}
+	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
 	}
 
-	sprintf(cmd, "%s %s set /tuner%d/program %d", hdhomerun_config,
-	        hdhomerun_id, hdhomerun_tuner, vchannels[index].program);
+	sprintf(item, "/tuner%d/program", hdhomerun_tuner);
+	sprintf(value, "%d", vchannels[index].program);
 	if (debug) {
-		printf("Executing: %s\n", cmd);
+		printf("Executing: %s:%s\n", item, value);
 	}
-	if (system(cmd) != 0) {
+	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
 	}
 
 	if (save_file_fd < 0) {
-		save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
-		if (save_file_fd < 0) {
-			return 0;
-		}
+					save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
+					if (save_file_fd < 0) {
+									return 0;
+					}
 	}
+
+	hdhomerun_device_destroy(hd);
 
 	if (save_process_pid != -1) {
 		kill(save_process_pid, SIGKILL);
@@ -409,8 +468,6 @@ static int read_config(const char *conffile)
 			continue;
 		} else if (strcmp(token, "[channelmap]") == 0) {
 			continue;
-		} else if (strcmp(token, "hdhomerun_config") == 0) {
-			hdhomerun_config = strdup(strtok(NULL, "= \t\n"));
 		} else if (strcmp(token, "tuners") == 0) {
 			hdhomerun_id = strdup(strtok(NULL, "=: \t\n"));
 			hdhomerun_tuner = atoi(strtok(NULL, ":, \t\n"));
@@ -433,7 +490,7 @@ static int read_config(const char *conffile)
 		}
 	}
 
-	if (hdhomerun_config && hdhomerun_id) {
+	if (hdhomerun_id) {
 		return 1;
 	} else {
 		return 0;
