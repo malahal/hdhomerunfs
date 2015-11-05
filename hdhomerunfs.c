@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 
 #include "hdhomerun/hdhomerun.h"
+#include "mmapring/mmapring.h"
 
 /*
  * channel map:
@@ -38,30 +39,16 @@ static int num_vchannels;
 static char *save_file_name;
 static int hdhomerun_tuner;
 static char *hdhomerun_id;
-static int save_file_fd = -1;
 static pthread_t save_process_thread;
 static int save_thread_running = 0;
 static int last_open_file_index = -1;
 static int read_counter = 0;
 static int debug = 0;
+static mmapring_t *save_ring;
 
 
-/*
- * Some players notably WDTV Live media player reads 10MB at the end of
- * a file before starting the play. We set the channel file size to
- * MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE.
- *
- * Any read upto MAX_FILE_SIZE is real and we wait for the save_file to grow.
- * Any read from MAX_FILE_SIZE to MAX_FILE_SIZE+ZERO_SIZE is returned zeros.
- * Any read from MAX_FILE_SIZE+ZERO_SIZE and beyond is a FAKE read and
- * returned with the first part of the file!
- *
- * FAKE_SIZE should be at least 10MB for WDTV Live, but we make it 100MB
- * here!
- */
-#define MAX_FILE_SIZE (8 * 1024 * 1024 * 1024ULL)
-#define ZERO_SIZE (100 * 1024 * 1024ull)
-#define FAKE_SIZE (100 * 1024 * 1024ULL)
+#define MIN_FILE_SIZE (512 * 1024)
+#define MAX_FILE_SIZE (64 * 1024 * 1024ULL)
 
 static int path_index(const char *path)
 {
@@ -95,14 +82,14 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 
 	res = 0;
 	index = path_index(path);
-	if (index == last_open_file_index) {
-		/* TODO: Just fake it like below and avoid a stat ??? */
+	if (index != num_vchannels) {
+		off_t save_size = save_ring->written;
 		stat(save_file_name, stbuf);
-		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
-	} else if (index != num_vchannels) {
+
 		stbuf->st_mode = S_IFREG | 0444;
 		stbuf->st_nlink = 1;
-		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
+		stbuf->st_size = save_size < MIN_FILE_SIZE ? MIN_FILE_SIZE : save_size;
+
 	} else {
 		res = -ENOENT;
 	}
@@ -167,14 +154,13 @@ static void *hdhomerun_save(void *edata)
 		fprintf(stderr, "unable to start stream\n");
 		return NULL;
 	}
+
 	/* loop */
 	while (save_thread_running) {
 		size_t actual_size;
 		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
 		if (ptr) {
-			FILE *out = fopen(save_file_name, "a+");
-			int ret = fwrite(ptr, actual_size, 1, out);
-			fclose(out);
+			mmapring_append(save_ring, ptr, actual_size);
 		}
 		usleep(64000);
 	}
@@ -258,13 +244,6 @@ static int hdhr_set_save(int index)
 		return 0;
 	}
 
-	if (save_file_fd < 0) {
-		save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
-		if (save_file_fd < 0) {
-			return 0;
-		}
-	}
-
 	hdhomerun_device_destroy(hd);
 
 	if (save_thread_running) {
@@ -274,7 +253,7 @@ static int hdhr_set_save(int index)
 		fprintf(stderr, "got %d from join\n", join_ret);
 	}
 
-	ftruncate(save_file_fd, 0);
+	mmapring_reset(save_ring);
 
 	if (spawn_thread(hdhomerun_save, &save_process_thread, NULL) < 0) {
 		return 0;
@@ -285,22 +264,10 @@ static int hdhr_set_save(int index)
 	return 1;
 }
 
-off_t save_file_size(void)
-{
-	struct stat buf;
-
-	if (fstat(save_file_fd, &buf) == 0) {
-		return buf.st_size;
-	}
-	return 0; /* As good as an error */
-}
-
 static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
-		     struct fuse_file_info *fi)
+		struct fuse_file_info *fi)
 {
-	size_t len;
-	(void) fi;
-	off_t save_size;
+	off_t save_size = save_ring->written;
 	int index, retry;
 	sigset_t sigset;
 
@@ -310,6 +277,7 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	sigaddset(&sigset, SIGALRM);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
 	read_counter++;
+
 	if (save_thread_running < 1 || last_open_file_index != index) {
 		hdhr_set_save(index);
 	}
@@ -319,17 +287,20 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		return -EIO;
 	}
 
+	offset = offset % MAX_FILE_SIZE;
 	if (offset < MAX_FILE_SIZE) {
 		retry = 5; /* limit the wait */
-		save_size = save_file_size();
-		while (offset + size > save_size && retry--) {
+		save_size = save_ring->written;
+		save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
+		while (offset + size > save_size && save_size < MAX_FILE_SIZE && retry--) {
 			if (debug) {
 				printf("SLEEPING to grow - saved size: %llu, "
 				       "offset: %llu, size: %zu\n",
 				       save_size, offset, size);
 			}
 			sleep(1);
-			save_size = save_file_size();
+			save_size = save_ring->written;
+			save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
 		}
 	}
 
@@ -343,22 +314,8 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 			}
 			size = save_size - offset;
 		}
-		lseek(save_file_fd, offset, SEEK_SET);
-		size = read(save_file_fd, buf, size);
-	} else if (offset >= MAX_FILE_SIZE + ZERO_SIZE) {
-		/* FAKE region */
-		if (debug) {
-			printf("Going to be a FAKE read - saved size: %llu, "
-			       "offset: %llu, size: %zu\n",
-			       save_size, offset, size);
-		}
-		lseek(save_file_fd, 0, SEEK_SET);
-		size = read(save_file_fd, buf, size);
+		memcpy(buf, save_ring->base+offset, size);
 	} else {
-		/* 
-		 * This is either ZERO region read or we could not wait
-		 * for the actual data to materialize.
-		 */
 		size = 0; /* Reached end of the file really! */
 	}
 
@@ -387,16 +344,6 @@ static void sig_handler(int signum)
 		}
 	}
 	old_read_counter = read_counter;
-
-	/* 
-	 * TODO: Ideally we would like to save the stream in two
-	 * files for circular ring implementation! For now, truncate
-	 * it and let the user restart watching!
-	 */
-	save_size = save_file_size();
-	if (save_size > MAX_FILE_SIZE) {
-		truncate(save_file_name, 0);
-	}
 
 	set_up_alarm();
 }
@@ -550,15 +497,12 @@ int main(int argc, char *argv[])
 	argv[i] = "-s";
 	argv[i+1] = "-s";
 
-	if (fopen(save_file_name, "w") == NULL) {
-		fprintf(stderr, "Can't open %s file for writing: %s\n",
-			save_file_name, strerror(errno));
-		exit(2);
-	}
 	if (!read_config(conffile)) {
 		fprintf(stderr, "error in config file, please fix it\n");
 		exit(2);
 	}
 
+	save_ring = mmapring_create(save_file_name, MAX_FILE_SIZE);
+	
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
 }
