@@ -40,6 +40,7 @@ static char *save_file_name;
 static int hdhomerun_tuner;
 static char *hdhomerun_id;
 static pthread_t save_process_thread;
+static pthread_mutex_t lock;
 static int save_thread_running = 0;
 static int last_open_file_index = -1;
 static int read_counter = 0;
@@ -160,7 +161,9 @@ static void *hdhomerun_save(void *edata)
 		size_t actual_size;
 		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
 		if (ptr) {
+			pthread_mutex_lock(&lock);
 			mmapring_append(save_ring, ptr, actual_size);
+			pthread_mutex_unlock(&lock);
 		}
 		usleep(64000);
 	}
@@ -253,7 +256,9 @@ static int hdhr_set_save(int index)
 		fprintf(stderr, "got %d from join\n", join_ret);
 	}
 
+	pthread_mutex_lock(&lock);
 	mmapring_reset(save_ring);
+	pthread_mutex_unlock(&lock);
 
 	if (spawn_thread(hdhomerun_save, &save_process_thread, NULL) < 0) {
 		return 0;
@@ -290,8 +295,10 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	offset = offset % MAX_FILE_SIZE;
 	if (offset < MAX_FILE_SIZE) {
 		retry = 5; /* limit the wait */
+		pthread_mutex_lock(&lock); 
 		save_size = save_ring->written;
 		save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
+		pthread_mutex_unlock(&lock);
 		while (offset + size > save_size && save_size < MAX_FILE_SIZE && retry--) {
 			if (debug) {
 				printf("SLEEPING to grow - saved size: %llu, "
@@ -299,8 +306,10 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 				       save_size, offset, size);
 			}
 			sleep(1);
+			pthread_mutex_lock(&lock);
 			save_size = save_ring->written;
 			save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
+			pthread_mutex_unlock(&lock);
 		}
 	}
 
@@ -503,6 +512,7 @@ int main(int argc, char *argv[])
 	}
 
 	save_ring = mmapring_create(save_file_name, MAX_FILE_SIZE);
+	pthread_mutex_init(&lock, NULL);
 	
 	return fuse_main(argc, argv, &hdhr_ops, NULL);
 }
