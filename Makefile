@@ -10,6 +10,7 @@ SOURCES=\
 ./deps/hdhomerun/hdhomerun_pkt.c \
 ./deps/hdhomerun/hdhomerun_sock_posix.c \
 ./deps/hdhomerun/hdhomerun_video.c \
+./deps/mmapring/mmapring.c \
 
 
 CFLAGS   = -g -std=c99 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -Wpointer-arith -Ideps/
@@ -23,6 +24,6 @@ hdhomerunfs: hdhomerunfs.c $(OBJECTS)
 	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
 
 clean:
-	$(RM) *.o deps/hdhomerun/*.o
+	$(RM) hdhomerunfs *.o deps/hdhomerun/*.o deps/mmapring/*.o
 
 
