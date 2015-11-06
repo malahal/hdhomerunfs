@@ -230,7 +230,8 @@ static int hdhr_set_save(int index)
 	}
 
 	sprintf(item, "/tuner%d/channel", hdhomerun_tuner);
-	sprintf(value, "8vsb:%s", vchannels[index].channel);
+	sprintf(value, "auto:%s", vchannels[index].channel);
+
 	if (debug) {
 		printf("Executing: %s:%s\n", item, value);
 	}
