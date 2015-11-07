@@ -18,6 +18,7 @@
 
 #include "hdhomerun/hdhomerun.h"
 #include "mmapring/mmapring.h"
+#include "inih/ini.h"
 
 /*
  * channel map:
@@ -35,9 +36,9 @@ struct vchannel {
 
 /* Globals */
 static struct vchannel *vchannels;
-static int num_vchannels;
+static int num_vchannels = 0;
 static char *save_file_name;
-static int hdhomerun_tuner;
+static int hdhomerun_tuner = 0;
 static char hdhomerun_id[64];
 static pthread_t save_process_thread;
 static pthread_mutex_t lock;
@@ -391,77 +392,48 @@ static struct fuse_operations hdhr_ops = {
 	.destroy        = hdhr_destroy,
 };
 
-static void add_channel(char *vchannel, char *pchannel, char *program,
-			char *name)
+static void add_channel(const char *vchannel, const char *pchannel, const char *program, const char *name)
 {
 	struct vchannel *channel;
-	char channel_name[64];
 
 	vchannels = realloc(vchannels, sizeof(struct vchannel) *
 			    (num_vchannels + 1));
 	channel = &vchannels[num_vchannels];
-	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", vchannel,
-		 name);
-	snprintf(channel->name, sizeof(channel->name), channel_name);
+	snprintf(channel->name, sizeof(channel->name), "/%s-%s.ts", vchannel, name);
 	channel->channel = strtol(pchannel, NULL, 10);
 	channel->program = strtol(program,  NULL, 10);
 	num_vchannels++;
 }
 
-#define MAXLINE 100
-static int read_config(const char *conffile)
+static int read_config(void* user, const char* section, const char* name, const char* value)
 {
-	FILE *fp;
-	char line[MAXLINE];
-	char buf[MAXLINE];
-	char *token;
-	char *vchannel, *pchannel, *program, *name;
+	if (strcmp(section, "global") == 0 && strcmp(name, "tuners") == 0) {
+		int delim_span = strcspn(value, ":") + 1;
+		if (delim_span >= sizeof(hdhomerun_id)) return 0;
+		snprintf(hdhomerun_id, delim_span, value);
+		hdhomerun_tuner = strtol(value + delim_span, NULL, 10);
+	} else if (strcmp(section, "channelmap") == 0) {
+		const char *vchannel, *pchannel, *program, *channel_name;
+		vchannel = name;
+		pchannel = value;
+		program  = strchr(value, ' ');
+		if (!program) return 0;	program+=1;
+		channel_name = strchr(program+1, ' ');
+		if (!channel_name) return 0; channel_name+=1;
 
-	fp = fopen(conffile, "r");
-	if (fp == NULL) {
-		fprintf(stderr, "fopen of %s failed: %s\n", conffile,
-		       strerror(errno));
-		exit(1);
-	}
-	while (fgets(line, sizeof(buf), fp) != NULL) {
-		strcpy(buf, line);
-		token = strtok(buf, " \t\n");
-		if (token == NULL) {
-			continue;
-		} else if (token[0] == '#' || token[0] == ';') {
-			continue;
-		} else if (strcmp(token, "[global]") == 0) {
-			continue;
-		} else if (strcmp(token, "[channelmap]") == 0) {
-			continue;
-		} else if (strcmp(token, "tuners") == 0) {
-			snprintf(hdhomerun_id, sizeof(hdhomerun_id), strtok(NULL, "=: \t\n"));
-			hdhomerun_tuner = strtol(strtok(NULL, ":, \t\n"), NULL, 10);
-		} else {
-			vchannel = token;
-			pchannel = strtok(NULL, "= \t");
-			program = strtok(NULL, " \t");
-			name = strtok(NULL, " \t\n");
-			if (!vchannel || !pchannel || !program || !name) {
-				fprintf(stderr, "incorrect syntax in file %s "
-					"line: %s\n", conffile, line);
-				return 0;
-			} else if (atoi(program) == 0) {
-				fprintf(stderr, "incorrect channel program: "
-					"%s, in file %s line: %s\n", program,
-					conffile, line);
-				return 0;
-			}
-			add_channel(vchannel, pchannel, program, name);
+		if (!vchannel || !pchannel || !program || !name) {
+			fprintf(stderr, "incorrect syntax in config file: %s = %s\n", name, value);
+			return 0;
+		} else if (strtol(program, NULL, 10) == 0) {
+			fprintf(stderr, "incorrect channel program: %s, for channel %s: %s\n", program, name, value);
+			return 0;
 		}
-	}
-	fclose(fp);
 
-	if (hdhomerun_id) {
-		return 1;
+		add_channel(vchannel, pchannel, program, channel_name);
 	} else {
-		return 0;
+		return 0;  /* unknown section/name, error */
 	}
+	return 1;
 }
 
 int main(int argc, char *argv[])
@@ -508,7 +480,7 @@ int main(int argc, char *argv[])
 	argv[i] = "-s";
 	argv[i+1] = "-s";
 
-	if (!read_config(conffile)) {
+	if (ini_parse(conffile, read_config, NULL) < 0 || strlen(hdhomerun_id) < 0) {
 		fprintf(stderr, "error in config file, please fix it\n");
 		exit(2);
 	}
