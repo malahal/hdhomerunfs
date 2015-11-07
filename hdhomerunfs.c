@@ -28,8 +28,8 @@
  *
  */
 struct vchannel {
-	char *name;
-	char *channel;
+	char name[64];
+	int  channel;
 	int  program;
 } vchannel;
 
@@ -38,7 +38,7 @@ static struct vchannel *vchannels;
 static int num_vchannels;
 static char *save_file_name;
 static int hdhomerun_tuner;
-static char *hdhomerun_id;
+static char hdhomerun_id[64];
 static pthread_t save_process_thread;
 static pthread_mutex_t lock;
 static int save_thread_running = 0;
@@ -230,7 +230,7 @@ static int hdhr_set_save(int index)
 	}
 
 	sprintf(item, "/tuner%d/channel", hdhomerun_tuner);
-	sprintf(value, "auto:%s", vchannels[index].channel);
+	sprintf(value, "auto:%d", vchannels[index].channel);
 
 	if (debug) {
 		printf("Executing: %s:%s\n", item, value);
@@ -395,16 +395,16 @@ static void add_channel(char *vchannel, char *pchannel, char *program,
 			char *name)
 {
 	struct vchannel *channel;
-	char channel_name[100];
+	char channel_name[64];
 
 	vchannels = realloc(vchannels, sizeof(struct vchannel) *
 			    (num_vchannels + 1));
 	channel = &vchannels[num_vchannels];
 	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", vchannel,
 		 name);
-	channel->name = strdup(channel_name);
-	channel->channel = strdup(pchannel);
-	channel->program = strtol(program, NULL, 10);
+	snprintf(channel->name, sizeof(channel->name), channel_name);
+	channel->channel = strtol(pchannel, NULL, 10);
+	channel->program = strtol(program,  NULL, 10);
 	num_vchannels++;
 }
 
@@ -435,8 +435,8 @@ static int read_config(const char *conffile)
 		} else if (strcmp(token, "[channelmap]") == 0) {
 			continue;
 		} else if (strcmp(token, "tuners") == 0) {
-			hdhomerun_id = strdup(strtok(NULL, "=: \t\n"));
-			hdhomerun_tuner = atoi(strtok(NULL, ":, \t\n"));
+			snprintf(hdhomerun_id, sizeof(hdhomerun_id), strtok(NULL, "=: \t\n"));
+			hdhomerun_tuner = strtol(strtok(NULL, ":, \t\n"), NULL, 10);
 		} else {
 			vchannel = token;
 			pchannel = strtok(NULL, "= \t");
@@ -455,6 +455,7 @@ static int read_config(const char *conffile)
 			add_channel(vchannel, pchannel, program, name);
 		}
 	}
+	fclose(fp);
 
 	if (hdhomerun_id) {
 		return 1;
@@ -518,5 +519,7 @@ int main(int argc, char *argv[])
 	int ret = fuse_main(argc, argv, &hdhr_ops, NULL);
 
 	mmapring_destroy(save_ring);
+	free(vchannels);
+
 	return ret;
 }
