@@ -514,6 +514,9 @@ int main(int argc, char *argv[])
 
 	save_ring = mmapring_create(save_file_name, MAX_FILE_SIZE);
 	pthread_mutex_init(&lock, NULL);
-	
-	return fuse_main(argc, argv, &hdhr_ops, NULL);
+
+	int ret = fuse_main(argc, argv, &hdhr_ops, NULL);
+
+	mmapring_destroy(save_ring);
+	return ret;
 }
