@@ -18,12 +18,15 @@ LDFLAGS  = -lm -lpthread -lrt -lfuse
 
 OBJECTS=$(SOURCES:%.c=%.o)
 
-all: hdhomerunfs
+all: hdhomerunfs channelscan
 
 hdhomerunfs: hdhomerunfs.c $(OBJECTS)
 	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
 
+channelscan: channelscan.c $(OBJECTS)
+	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
+
 clean:
-	$(RM) hdhomerunfs *.o deps/hdhomerun/*.o deps/mmapring/*.o
+	$(RM) hdhomerunfs channelscan *.o deps/hdhomerun/*.o deps/mmapring/*.o
 
 
