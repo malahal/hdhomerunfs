@@ -49,8 +49,8 @@ static int debug = 0;
 static mmapring_t *save_ring;
 
 
-#define MIN_FILE_SIZE (512 * 1024)
-#define MAX_FILE_SIZE (64 * 1024 * 1024ULL)
+#define MIN_FILE_SIZE (4 * 1024)
+#define MAX_FILE_SIZE (8 * 1024 * 1024ULL)
 
 static int path_index(const char *path)
 {
