@@ -275,7 +275,7 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		struct fuse_file_info *fi)
 {
 	off_t save_size = save_ring->written;
-	int index, retry;
+	int index, retry = 5;
 	sigset_t sigset;
 
 	index = path_index(path);
@@ -294,41 +294,38 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		return -EIO;
 	}
 
-	offset = offset % MAX_FILE_SIZE;
-	if (offset < MAX_FILE_SIZE) {
-		retry = 5; /* limit the wait */
-		pthread_mutex_lock(&lock); 
-		save_size = save_ring->written;
-		save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
-		pthread_mutex_unlock(&lock);
-		while (offset + size > save_size && save_size < MAX_FILE_SIZE && retry--) {
-			if (debug) {
-				printf("SLEEPING to grow - saved size: %llu, "
-				       "offset: %llu, size: %zu\n",
-				       save_size, offset, size);
-			}
-			sleep(1);
-			pthread_mutex_lock(&lock);
-			save_size = save_ring->written;
-			save_size = save_size > MAX_FILE_SIZE ? MAX_FILE_SIZE : save_size;
-			pthread_mutex_unlock(&lock);
+	pthread_mutex_lock(&lock); 
+	save_size = save_ring->written;
+	pthread_mutex_unlock(&lock);
+
+	while ((offset + size) > save_size && retry--) {
+		if (debug) {
+			fprintf(stderr, "SLEEPING to grow - saved size: %llu, offset: %llu, size: %zu\n",
+					save_size, offset, size);
 		}
+		usleep(1000000);
+
+		pthread_mutex_lock(&lock);
+		save_size = save_ring->written;
+		pthread_mutex_unlock(&lock);
 	}
 
 	if (offset < save_size) {
 		if (offset + size > save_size) {
 			if (debug) {
-				fprintf(stderr, "Going to be a SHORT read - "
-				       "saved size: %llu, offset: %llu, "
-				       "size: %zu\n",
-				       save_size, offset, size);
+				fprintf(stderr, "Going to be a SHORT read - saved size: %llu, offset: %llu, size: %zu\n",
+						save_size, offset, size);
 			}
 			size = save_size - offset;
 		}
-		memcpy(buf, save_ring->base+offset, size);
 	} else {
 		fprintf(stderr, "Going to be an empty read\n");
 		size = 0; /* Reached end of the file really! */
+	}
+
+	offset = offset % MAX_FILE_SIZE;
+	if (size > 0) {
+		memcpy(buf, save_ring->base+offset, size);
 	}
 
 	return size;
