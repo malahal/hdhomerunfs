@@ -44,6 +44,7 @@ static pthread_t save_process_thread;
 static pthread_mutex_t lock;
 static int save_thread_running = 0;
 static int last_open_file_index = -1;
+static struct timeval last_write = {0, 0};
 static int read_counter = 0;
 static int debug = 0;
 static mmapring_t *save_ring;
@@ -92,6 +93,13 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 		stbuf->st_nlink = 1;
 		stbuf->st_size = save_size < MIN_FILE_SIZE ? MIN_FILE_SIZE : save_size;
 
+		pthread_mutex_lock(&lock);
+		stbuf->st_mtim.tv_sec = last_write.tv_sec;
+		stbuf->st_ctim.tv_sec = last_write.tv_sec;
+
+		stbuf->st_mtim.tv_nsec = last_write.tv_usec * 1000;
+		stbuf->st_ctim.tv_nsec = last_write.tv_usec * 1000;
+		pthread_mutex_unlock(&lock);
 	} else {
 		res = -ENOENT;
 	}
@@ -163,6 +171,7 @@ static void *hdhomerun_save(void *edata)
 		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
 		if (ptr) {
 			pthread_mutex_lock(&lock);
+			gettimeofday(&last_write, NULL);
 			mmapring_append(save_ring, ptr, actual_size);
 			pthread_mutex_unlock(&lock);
 		}
