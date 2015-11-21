@@ -120,7 +120,7 @@ static int hdhr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int hdhr_open(const char *path, struct fuse_file_info *fi)
 {
 	if (debug) {
-		printf("open called for path: %s\n", path);
+		fprintf(stderr, "open called for path: %s\n", path);
 	}
 	if (channel_file(path)) {
 	    return 0;
@@ -131,7 +131,7 @@ static int hdhr_open(const char *path, struct fuse_file_info *fi)
 static int hdhr_release(const char *path, struct fuse_file_info *fi)
 {
 	if (debug) {
-		printf("close called for path: %s\n", path);
+		fprintf(stderr, "close called for path: %s\n", path);
 	}
 	if (channel_file(path)) {
 	    return 0;
@@ -234,7 +234,7 @@ static int hdhr_set_save(int index)
 	sprintf(value, "auto:%d", vchannels[index].channel);
 
 	if (debug) {
-		printf("Executing: %s:%s\n", item, value);
+		fprintf(stderr, "Executing: %s:%s\n", item, value);
 	}
 	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
@@ -243,7 +243,7 @@ static int hdhr_set_save(int index)
 	sprintf(item, "/tuner%d/program", hdhomerun_tuner);
 	sprintf(value, "%d", vchannels[index].program);
 	if (debug) {
-		printf("Executing: %s:%s\n", item, value);
+		fprintf(stderr, "Executing: %s:%s\n", item, value);
 	}
 	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
@@ -318,7 +318,7 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	if (offset < save_size) {
 		if (offset + size > save_size) {
 			if (debug) {
-				printf("Going to be a SHORT read - "
+				fprintf(stderr, "Going to be a SHORT read - "
 				       "saved size: %llu, offset: %llu, "
 				       "size: %zu\n",
 				       save_size, offset, size);
@@ -327,6 +327,7 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 		}
 		memcpy(buf, save_ring->base+offset, size);
 	} else {
+		fprintf(stderr, "Going to be an empty read\n");
 		size = 0; /* Reached end of the file really! */
 	}
 
@@ -340,14 +341,14 @@ static void sig_handler(int signum)
 	static int old_read_counter;
 
 	if (debug) {
-		printf("alarm handler called; old: %d, new: %d\n",
+		fprintf(stderr, "alarm handler called; old: %d, new: %d\n",
 		       old_read_counter, read_counter);
 	}
 
 	if (read_counter == old_read_counter) {
 		/* No reads since the last alarm */
 		if (debug) {
-			printf("stopping save thread\n");
+			fprintf(stderr, "stopping save thread\n");
 		}
 		if (save_thread_running) {
 			save_thread_running = 0;
@@ -374,7 +375,7 @@ static void *hdhr_init(struct fuse_conn_info *conn)
 static void hdhr_destroy(void *arg)
 {
 	if (debug) {
-		printf("exiting....\n");
+		fprintf(stderr, "exiting....\n");
 	}
 	if (save_thread_running) {		
 		save_thread_running = 0;
