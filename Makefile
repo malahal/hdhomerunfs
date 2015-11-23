@@ -1,33 +1,32 @@
 SOURCES=\
-./deps/hdhomerun/hdhomerun_channels.c \
-./deps/hdhomerun/hdhomerun_channelscan.c \
-./deps/hdhomerun/hdhomerun_control.c \
-./deps/hdhomerun/hdhomerun_debug.c \
-./deps/hdhomerun/hdhomerun_device.c \
-./deps/hdhomerun/hdhomerun_device_selector.c \
-./deps/hdhomerun/hdhomerun_discover.c \
-./deps/hdhomerun/hdhomerun_os_posix.c \
-./deps/hdhomerun/hdhomerun_pkt.c \
-./deps/hdhomerun/hdhomerun_sock_posix.c \
-./deps/hdhomerun/hdhomerun_video.c \
 ./deps/mmapring/mmapring.c \
-./deps/inih/ini.c \
 
+DEPS=\
+./deps/hdhomerun/libhdhomerun.a \
+./deps/inih/inih.a \
+
+
+DEPS_LDFLAGS= 
+DEPS_LDFLAGS+= $(foreach dep,$(DEPS),-L$(dir $(dep)) -l$(subst lib,,$(notdir $(basename $(dep)))))
 
 CFLAGS   = -g -std=c99 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -Wpointer-arith -Ideps/
-LDFLAGS  = -lm -lpthread -lrt -lfuse
+LDFLAGS  = -lm -lpthread -lrt -lfuse $(DEPS_LDFLAGS)
 
 OBJECTS=$(SOURCES:%.c=%.o)
 
 all: hdhomerunfs channelscan
 
-hdhomerunfs: hdhomerunfs.c $(OBJECTS)
+%.a: 
+	$(MAKE) -C $(@D)
+
+hdhomerunfs: hdhomerunfs.c $(OBJECTS) $(DEPS)
 	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
 
-channelscan: channelscan.c $(OBJECTS)
+channelscan: channelscan.c $(OBJECTS) $(DEPS)
 	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
 
 clean:
-	$(RM) hdhomerunfs channelscan *.o deps/hdhomerun/*.o deps/mmapring/*.o deps/inih/*.o
-
+	$(RM) hdhomerunfs channelscan *.o deps/mmapring/*.o
+	$(MAKE) -C deps/hdhomerun clean
+	$(MAKE) -C deps/inih clean
 
