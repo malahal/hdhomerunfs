@@ -10,6 +10,10 @@
 
 #include "mmapring.h"
 
+#ifndef MAP_ANONYMOUS
+#  define MAP_ANONYMOUS MAP_ANON
+#endif
+
 mmapring_t* mmapring_create(const char *path, off_t size)
 {
 	mmapring_t *rng = calloc(1, sizeof(mmapring_t));
