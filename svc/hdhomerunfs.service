@@ -1,0 +1,10 @@
+[Unit]
+Description=HDHR service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hdhomerunfs -d -f -o allow_other /tmp/hdhr.ts /etc/hdhomerunfs/hdhomerunfs.ini /mnt/HDHR
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

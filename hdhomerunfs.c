@@ -16,52 +16,42 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 
+#include "hdhomerun/hdhomerun.h"
+#include "mmapring/mmapring.h"
+#include "inih/ini.h"
+
 /*
  * channel map:
  *
  * First entry is the channel file name that appears in the fuse FS.
- * Second one is physical RF channel (or frequency) that channel
- * 	value that hdhomerun_config takes.
+ * Second one is physical the RF channel (or frequency) 
  * Third entry is the 'program' number in the above RF stream.
  *
- * The second and third fields are passed to hdhomerun_config
  */
 struct vchannel {
-	char *name;
-	char *channel;
-	char program;
+	char name[64];
+	int  channel;
+	int  program;
 } vchannel;
 
 /* Globals */
 static struct vchannel *vchannels;
-static int num_vchannels;
+static int num_vchannels = 0;
 static char *save_file_name;
-static char *hdhomerun_config;
-static int hdhomerun_tuner;
-static char *hdhomerun_id;
-static int save_file_fd = -1;
-static int save_process_pid = -1;
+static int hdhomerun_tuner = 0;
+static char hdhomerun_id[64];
+static pthread_t save_process_thread;
+static pthread_mutex_t lock;
+static int save_thread_running = 0;
 static int last_open_file_index = -1;
+static struct timeval last_write = {0, 0};
 static int read_counter = 0;
 static int debug = 0;
+static mmapring_t *save_ring;
 
 
-/*
- * Some players notably WDTV Live media player reads 10MB at the end of
- * a file before starting the play. We set the channel file size to
- * MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE.
- *
- * Any read upto MAX_FILE_SIZE is real and we wait for the save_file to grow.
- * Any read from MAX_FILE_SIZE to MAX_FILE_SIZE+ZERO_SIZE is returned zeros.
- * Any read from MAX_FILE_SIZE+ZERO_SIZE and beyond is a FAKE read and
- * returned with the first part of the file!
- *
- * FAKE_SIZE should be at least 10MB for WDTV Live, but we make it 100MB
- * here!
- */
-#define MAX_FILE_SIZE (8 * 1024 * 1024 * 1024ULL)
-#define ZERO_SIZE (100 * 1024 * 1024ull)
-#define FAKE_SIZE (100 * 1024 * 1024ULL)
+#define MIN_FILE_SIZE (4 * 1024)
+#define MAX_FILE_SIZE (8 * 1024 * 1024ULL)
 
 static int path_index(const char *path)
 {
@@ -95,14 +85,21 @@ static int hdhr_getattr(const char *path, struct stat *stbuf)
 
 	res = 0;
 	index = path_index(path);
-	if (index == last_open_file_index) {
-		/* TODO: Just fake it like below and avoid a stat ??? */
+	if (index != num_vchannels) {
+		off_t save_size = save_ring->written;
 		stat(save_file_name, stbuf);
-		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
-	} else if (index != num_vchannels) {
+
 		stbuf->st_mode = S_IFREG | 0444;
 		stbuf->st_nlink = 1;
-		stbuf->st_size = MAX_FILE_SIZE + ZERO_SIZE + FAKE_SIZE;
+		stbuf->st_size = save_size < MIN_FILE_SIZE ? MIN_FILE_SIZE : save_size;
+
+		pthread_mutex_lock(&lock);
+		stbuf->st_mtim.tv_sec = last_write.tv_sec;
+		stbuf->st_ctim.tv_sec = last_write.tv_sec;
+
+		stbuf->st_mtim.tv_nsec = last_write.tv_usec * 1000;
+		stbuf->st_ctim.tv_nsec = last_write.tv_usec * 1000;
+		pthread_mutex_unlock(&lock);
 	} else {
 		res = -ENOENT;
 	}
@@ -131,7 +128,7 @@ static int hdhr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int hdhr_open(const char *path, struct fuse_file_info *fi)
 {
 	if (debug) {
-		printf("open called for path: %s\n", path);
+		fprintf(stderr, "open called for path: %s\n", path);
 	}
 	if (channel_file(path)) {
 	    return 0;
@@ -142,7 +139,7 @@ static int hdhr_open(const char *path, struct fuse_file_info *fi)
 static int hdhr_release(const char *path, struct fuse_file_info *fi)
 {
 	if (debug) {
-		printf("close called for path: %s\n", path);
+		fprintf(stderr, "close called for path: %s\n", path);
 	}
 	if (channel_file(path)) {
 	    return 0;
@@ -150,88 +147,144 @@ static int hdhr_release(const char *path, struct fuse_file_info *fi)
 	return -ENOENT;
 }
 
-static pid_t hdhomerun_save(void)
+static void *hdhomerun_save(void *edata)
 {
-	pid_t pid;
-	char tuner[10];
+	struct hdhomerun_device_t *hd;
+	char tuner[10] = {0};
 
-	pid = fork();
-	if (pid == 0) { /* Child */
-		sprintf(tuner, "/tuner%d", hdhomerun_tuner);
-		if (execlp(hdhomerun_config, hdhomerun_config, hdhomerun_id,
-			   "save", tuner, save_file_name, (char *)NULL) == -1) {
-			/* TODO */
+	hd = hdhomerun_device_create_from_str(hdhomerun_id, NULL);
+	sprintf(tuner, "%d", hdhomerun_tuner);
+	if (hdhomerun_device_set_tuner_from_str(hd, tuner) <= 0) {
+		fprintf(stderr, "invalid tuner number\n");
+		return NULL;
+	}
+
+	int ret = hdhomerun_device_stream_start(hd);
+	if (ret <= 0) {
+		fprintf(stderr, "unable to start stream\n");
+		return NULL;
+	}
+
+	/* loop */
+	while (save_thread_running) {
+		size_t actual_size;
+		uint8_t *ptr = hdhomerun_device_stream_recv(hd, VIDEO_DATA_BUFFER_SIZE_1S, &actual_size);
+		if (ptr) {
+			pthread_mutex_lock(&lock);
+			gettimeofday(&last_write, NULL);
+			mmapring_append(save_ring, ptr, actual_size);
+			pthread_mutex_unlock(&lock);
 		}
-	} else if (pid != -1) { /* Parent */
-		return pid;
-	} else {
+		usleep(64000);
+	}
+
+	/* cleanup */
+	hdhomerun_device_stream_stop(hd);
+	hdhomerun_device_destroy(hd);
+
+	fprintf(stderr, "save thread exiting...\n");
+	pthread_exit(NULL);
+
+	return NULL;
+}
+
+static int spawn_thread(void *(*func)(void *), pthread_t *thread_id, void *edata) {
+	pthread_attr_t attr;
+	int result = 0;
+
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+	if (0 != pthread_create(thread_id, &attr, func, edata)) {
+		result = -1;
+	}
+	return result;
+}
+
+/* helper function to set device parameters */
+static int hdhr_set(struct hdhomerun_device_t *hd, char *item, char *value)
+{
+	char *ret_error;
+	if (hdhomerun_device_set_var(hd, item, value, NULL, &ret_error) < 0) {
+		fprintf(stderr, "communication error sending request to hdhomerun device\n");
 		return -1;
 	}
+
+	if (ret_error) {
+		fprintf(stderr, "%s\n", ret_error);
+		return 0;
+	}
+
+	return 1;
 }
 
 /* This function must be run while blocking ALARM signal */
 static int hdhr_set_save(int index)
 {
-	char cmd[100];
+	char item[100];
+	char value[100];
+	char *ret_error;
 
-	sprintf(cmd, "%s %s set /tuner%d/channel %s", hdhomerun_config,
-	        hdhomerun_id, hdhomerun_tuner, vchannels[index].channel);
+	struct hdhomerun_device_t *hd;
+	const char *model;
+
+	hd = hdhomerun_device_create_from_str(hdhomerun_id, NULL);
+	model = hdhomerun_device_get_model_str(hd);
+	if (!model) {
+		fprintf(stderr, "unable to connect to device\n");
+		hdhomerun_device_destroy(hd);
+		return 0;
+	}
 	if (debug) {
-		printf("Executing: %s\n", cmd);
-	}
-	if (system(cmd) != 0) {
-		return 0;
+		fprintf(stderr, "found hdhr model: %s\n", model);
 	}
 
-	sprintf(cmd, "%s %s set /tuner%d/program %d", hdhomerun_config,
-	        hdhomerun_id, hdhomerun_tuner, vchannels[index].program);
+	sprintf(item, "/tuner%d/channel", hdhomerun_tuner);
+	sprintf(value, "auto:%d", vchannels[index].channel);
+
 	if (debug) {
-		printf("Executing: %s\n", cmd);
+		fprintf(stderr, "Executing: %s:%s\n", item, value);
 	}
-	if (system(cmd) != 0) {
+	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
 	}
 
-	if (save_file_fd < 0) {
-		save_file_fd = open(save_file_name, O_RDWR | O_CREAT, 0755);
-		if (save_file_fd < 0) {
-			return 0;
-		}
+	sprintf(item, "/tuner%d/program", hdhomerun_tuner);
+	sprintf(value, "%d", vchannels[index].program);
+	if (debug) {
+		fprintf(stderr, "Executing: %s:%s\n", item, value);
 	}
-
-	if (save_process_pid != -1) {
-		kill(save_process_pid, SIGKILL);
-		waitpid(save_process_pid, NULL, 0);
-		save_process_pid = -1;
-	}
-
-	ftruncate(save_file_fd, 0);
-	save_process_pid = hdhomerun_save();
-	if (save_process_pid == -1) {
+	if (hdhr_set(hd, item, value) < 1) {
 		return 0;
 	}
+
+	hdhomerun_device_destroy(hd);
+
+	if (save_thread_running) {
+		fprintf(stderr, "need to kill save thread %x\n", save_process_thread);
+		save_thread_running = 0;
+		int join_ret = pthread_join(save_process_thread, NULL);
+		fprintf(stderr, "got %d from join\n", join_ret);
+	}
+
+	pthread_mutex_lock(&lock);
+	mmapring_reset(save_ring);
+	pthread_mutex_unlock(&lock);
+
+	if (spawn_thread(hdhomerun_save, &save_process_thread, NULL) < 0) {
+		return 0;
+	}
+	save_thread_running = 1;
 	last_open_file_index = index;
 
 	return 1;
 }
 
-off_t save_file_size(void)
-{
-	struct stat buf;
-
-	if (fstat(save_file_fd, &buf) == 0) {
-		return buf.st_size;
-	}
-	return 0; /* As good as an error */
-}
-
 static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
-		     struct fuse_file_info *fi)
+		struct fuse_file_info *fi)
 {
-	size_t len;
-	(void) fi;
-	off_t save_size;
-	int index, retry;
+	off_t save_size = save_ring->written;
+	int index, retry = 5;
 	sigset_t sigset;
 
 	index = path_index(path);
@@ -240,56 +293,48 @@ static int hdhr_read(const char *path, char *buf, size_t size, off_t offset,
 	sigaddset(&sigset, SIGALRM);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
 	read_counter++;
-	if (save_process_pid == -1 || last_open_file_index != index) {
+
+	if (save_thread_running < 1 || last_open_file_index != index) {
 		hdhr_set_save(index);
 	}
 	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
 
-	if (save_process_pid == -1) {
+	if (save_thread_running < 1) {
 		return -EIO;
 	}
 
-	if (offset < MAX_FILE_SIZE) {
-		retry = 5; /* limit the wait */
-		save_size = save_file_size();
-		while (offset + size > save_size && retry--) {
-			if (debug) {
-				printf("SLEEPING to grow - saved size: %llu, "
-				       "offset: %llu, size: %zu\n",
-				       save_size, offset, size);
-			}
-			sleep(1);
-			save_size = save_file_size();
+	pthread_mutex_lock(&lock); 
+	save_size = save_ring->written;
+	pthread_mutex_unlock(&lock);
+
+	while ((offset + size) > save_size && retry--) {
+		if (debug) {
+			fprintf(stderr, "SLEEPING to grow - saved size: %llu, offset: %llu, size: %zu\n",
+					save_size, offset, size);
 		}
+		usleep(1000000);
+
+		pthread_mutex_lock(&lock);
+		save_size = save_ring->written;
+		pthread_mutex_unlock(&lock);
 	}
 
 	if (offset < save_size) {
 		if (offset + size > save_size) {
 			if (debug) {
-				printf("Going to be a SHORT read - "
-				       "saved size: %llu, offset: %llu, "
-				       "size: %zu\n",
-				       save_size, offset, size);
+				fprintf(stderr, "Going to be a SHORT read - saved size: %llu, offset: %llu, size: %zu\n",
+						save_size, offset, size);
 			}
 			size = save_size - offset;
 		}
-		lseek(save_file_fd, offset, SEEK_SET);
-		size = read(save_file_fd, buf, size);
-	} else if (offset >= MAX_FILE_SIZE + ZERO_SIZE) {
-		/* FAKE region */
-		if (debug) {
-			printf("Going to be a FAKE read - saved size: %llu, "
-			       "offset: %llu, size: %zu\n",
-			       save_size, offset, size);
-		}
-		lseek(save_file_fd, 0, SEEK_SET);
-		size = read(save_file_fd, buf, size);
 	} else {
-		/* 
-		 * This is either ZERO region read or we could not wait
-		 * for the actual data to materialize.
-		 */
+		fprintf(stderr, "Going to be an empty read\n");
 		size = 0; /* Reached end of the file really! */
+	}
+
+	offset = offset % MAX_FILE_SIZE;
+	if (size > 0) {
+		memcpy(buf, save_ring->base+offset, size);
 	}
 
 	return size;
@@ -302,32 +347,21 @@ static void sig_handler(int signum)
 	static int old_read_counter;
 
 	if (debug) {
-		printf("alarm handler called; old: %d, new: %d\n",
+		fprintf(stderr, "alarm handler called; old: %d, new: %d\n",
 		       old_read_counter, read_counter);
 	}
 
 	if (read_counter == old_read_counter) {
 		/* No reads since the last alarm */
-		if (save_process_pid != -1) {
-			if (debug) {
-				printf("killing pid: %d\n", save_process_pid);
-			}
-			kill(save_process_pid, SIGKILL);
-			waitpid(save_process_pid, NULL, 0);
-			save_process_pid = -1;
+		if (debug) {
+			fprintf(stderr, "stopping save thread\n");
+		}
+		if (save_thread_running) {
+			save_thread_running = 0;
+			pthread_join(save_process_thread, NULL);
 		}
 	}
 	old_read_counter = read_counter;
-
-	/* 
-	 * TODO: Ideally we would like to save the stream in two
-	 * files for circular ring implementation! For now, truncate
-	 * it and let the user restart watching!
-	 */
-	save_size = save_file_size();
-	if (save_size > MAX_FILE_SIZE) {
-		truncate(save_file_name, 0);
-	}
 
 	set_up_alarm();
 }
@@ -347,12 +381,11 @@ static void *hdhr_init(struct fuse_conn_info *conn)
 static void hdhr_destroy(void *arg)
 {
 	if (debug) {
-		printf("destroy called\n");
+		fprintf(stderr, "exiting....\n");
 	}
-	if (save_process_pid != -1) {
-		kill(save_process_pid, SIGKILL);
-		waitpid(save_process_pid, NULL, 0);
-		save_process_pid = -1;
+	if (save_thread_running) {		
+		save_thread_running = 0;
+		pthread_join(save_process_thread, NULL);
 	}
 }
 
@@ -366,78 +399,48 @@ static struct fuse_operations hdhr_ops = {
 	.destroy        = hdhr_destroy,
 };
 
-static void add_channel(char *vchannel, char *pchannel, char *program,
-			char *name)
+static void add_channel(const char *vchannel, const char *pchannel, const char *program, const char *name)
 {
 	struct vchannel *channel;
-	char channel_name[100];
 
 	vchannels = realloc(vchannels, sizeof(struct vchannel) *
 			    (num_vchannels + 1));
 	channel = &vchannels[num_vchannels];
-	snprintf(channel_name, sizeof(channel_name), "/%s-%s.ts", name,
-		 vchannel);
-	channel->name = strdup(channel_name);
-	channel->channel = strdup(pchannel);
-	channel->program = atoi(program);
+	snprintf(channel->name, sizeof(channel->name), "/%s-%s.ts", vchannel, name);
+	channel->channel = strtol(pchannel, NULL, 10);
+	channel->program = strtol(program,  NULL, 10);
 	num_vchannels++;
 }
 
-#define MAXLINE 100
-static int read_config(const char *conffile)
+static int read_config(void* user, const char* section, const char* name, const char* value)
 {
-	FILE *fp;
-	char line[MAXLINE];
-	char buf[MAXLINE];
-	char *token;
-	char *vchannel, *pchannel, *program, *name;
+	if (strcmp(section, "global") == 0 && strcmp(name, "tuners") == 0) {
+		int delim_span = strcspn(value, ":") + 1;
+		if (delim_span >= sizeof(hdhomerun_id)) return 0;
+		snprintf(hdhomerun_id, delim_span, value);
+		hdhomerun_tuner = strtol(value + delim_span, NULL, 10);
+	} else if (strcmp(section, "channelmap") == 0) {
+		const char *vchannel, *pchannel, *program, *channel_name;
+		vchannel = name;
+		pchannel = value;
+		program  = strchr(value, ' ');
+		if (!program) return 0;	program+=1;
+		channel_name = strchr(program+1, ' ');
+		if (!channel_name) return 0; channel_name+=1;
 
-	fp = fopen(conffile, "r");
-	if (fp == NULL) {
-		fprintf(stderr, "fopen of %s failed: %s\n", conffile,
-		       strerror(errno));
-		exit(1);
-	}
-	while (fgets(line, sizeof(buf), fp) != NULL) {
-		strcpy(buf, line);
-		token = strtok(buf, " \t\n");
-		if (token == NULL) {
-			continue;
-		} else if (token[0] == '#' || token[0] == ';') {
-			continue;
-		} else if (strcmp(token, "[global]") == 0) {
-			continue;
-		} else if (strcmp(token, "[channelmap]") == 0) {
-			continue;
-		} else if (strcmp(token, "hdhomerun_config") == 0) {
-			hdhomerun_config = strdup(strtok(NULL, "= \t\n"));
-		} else if (strcmp(token, "tuners") == 0) {
-			hdhomerun_id = strdup(strtok(NULL, "=: \t\n"));
-			hdhomerun_tuner = atoi(strtok(NULL, ":, \t\n"));
-		} else {
-			vchannel = token;
-			pchannel = strtok(NULL, "= \t");
-			program = strtok(NULL, " \t");
-			name = strtok(NULL, " \t\n");
-			if (!vchannel || !pchannel || !program || !name) {
-				fprintf(stderr, "incorrect syntax in file %s "
-					"line: %s\n", conffile, line);
-				return 0;
-			} else if (atoi(program) == 0) {
-				fprintf(stderr, "incorrect channel program: "
-					"%s, in file %s line: %s\n", program,
-					conffile, line);
-				return 0;
-			}
-			add_channel(vchannel, pchannel, program, name);
+		if (!vchannel || !pchannel || !program || !name) {
+			fprintf(stderr, "incorrect syntax in config file: %s = %s\n", name, value);
+			return 0;
+		} else if (strtol(program, NULL, 10) == 0) {
+			fprintf(stderr, "incorrect channel program: %s, for channel %s: %s\n", program, name, value);
+			return 0;
 		}
-	}
 
-	if (hdhomerun_config && hdhomerun_id) {
-		return 1;
+		add_channel(vchannel, pchannel, program, channel_name);
 	} else {
-		return 0;
+		return 0;  /* unknown section/name, error */
 	}
+	return 1;
 }
 
 int main(int argc, char *argv[])
@@ -484,15 +487,18 @@ int main(int argc, char *argv[])
 	argv[i] = "-s";
 	argv[i+1] = "-s";
 
-	if (fopen(save_file_name, "w") == NULL) {
-		fprintf(stderr, "Can't open %s file for writing: %s\n",
-			save_file_name, strerror(errno));
-		exit(2);
-	}
-	if (!read_config(conffile)) {
+	if (ini_parse(conffile, read_config, NULL) < 0 || strlen(hdhomerun_id) < 0) {
 		fprintf(stderr, "error in config file, please fix it\n");
 		exit(2);
 	}
 
-	return fuse_main(argc, argv, &hdhr_ops, NULL);
+	save_ring = mmapring_create(save_file_name, MAX_FILE_SIZE);
+	pthread_mutex_init(&lock, NULL);
+
+	int ret = fuse_main(argc, argv, &hdhr_ops, NULL);
+
+	mmapring_destroy(save_ring);
+	free(vchannels);
+
+	return ret;
 }

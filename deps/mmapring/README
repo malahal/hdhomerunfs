@@ -1,0 +1,9 @@
+minimal implementation of circular ring buffer.
+
+cobbled together from:
+
+https://en.wikipedia.org/wiki/Circular_buffer#Optimized_POSIX_Implementation
+http://www.codeproject.com/Articles/3479/The-Bip-Buffer-The-Circular-Buffer-with-a-Twist
+https://github.com/willemt/cbuffer
+https://github.com/codefever/ringbuffer
+
