@@ -76,12 +76,7 @@ void mmapring_destroy(mmapring_t *rng)
 
 off_t mmapring_append(mmapring_t *rng, const char *p, off_t len)
 {
-	off_t wlen = rng->size;
-	if (wlen <= 0) {
-		errno = ENOSPC;
-		return 0;
-	}
-	wlen = (wlen > len ? len : wlen);
+	off_t wlen = (rng->size > len ? len : rng->size);
 
 	memcpy(rng->base + rng->write_offset, p, wlen);
 	rng->written += wlen;
