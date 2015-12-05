@@ -69,9 +69,7 @@ mmapring_t* mmapring_create(const char *path, off_t size)
 void mmapring_destroy(mmapring_t *rng)
 {
 	if (rng) {
-		if (munmap(rng->base, rng->size * 2) < 0) {
-			perror("munmap");
-		}
+		munmap(rng->base, rng->size * 2);
 		free(rng);
 	}
 }
