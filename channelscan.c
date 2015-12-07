@@ -4,7 +4,7 @@
 
 static volatile sig_atomic_t sigabort_flag = FALSE;
 static volatile sig_atomic_t siginfo_flag = FALSE;
- 
+
 static void sigabort_handler(int arg)
 {
 	sigabort_flag = TRUE;
@@ -32,7 +32,7 @@ static int cmd_scan(const char *device_str, const char *tuner_str)
 {
 	struct hdhomerun_device_t *hd;
 	hd = hdhomerun_device_create_from_str(device_str, NULL);
-	
+
 	if (!hd) {
 		fprintf(stderr, "failed to connect to device %s\n", device_str);
 		return -1;
@@ -96,9 +96,9 @@ static int cmd_scan(const char *device_str, const char *tuner_str)
 		int i;
 		for (i = 0; i < result.program_count; i++) {
 			struct hdhomerun_channelscan_program_t *program = &result.programs[i];
-		if (program->virtual_major > 0) {
+			if (program->virtual_major > 0) {
 				fprintf(fp, "%d.%d = %d %d %s\n", program->virtual_major, program->virtual_minor, result.frequency, program->program_number, program->name, result.channel_str, program->program_str);
-		}
+			}
 		}
 	}
 
@@ -116,11 +116,34 @@ static int cmd_scan(const char *device_str, const char *tuner_str)
 
 int main(int argc, char* argv[])
 {
+	struct hdhomerun_discover_device_t result_list[64];
+	int count;
+
 	if (argc < 3) {
-					fprintf(stderr, "usage: %s <device> <tuner>\n", argv[0]);
-					exit(1);
+		fprintf(stderr, "usage: %s <device> <tuner>\n\ndefaulting to first discoverable tuner...\n", argv[0]);
+
+		count = hdhomerun_discover_find_devices_custom(0, HDHOMERUN_DEVICE_TYPE_TUNER, HDHOMERUN_DEVICE_ID_WILDCARD, result_list, 64);
+		if (count < 0) {
+			fprintf(stderr, "error sending discover request\n");
+			return -1; 
+		}
+		if (count == 0) {
+			printf("no devices found\n");
+			return 0;
+		}
+
+		if (count > 0) {
+			struct hdhomerun_discover_device_t *result = &result_list[0];
+			char ip[16] = {0};
+
+			sprintf(ip, "%u.%u.%u.%u", (unsigned int)(result->ip_addr >> 24) & 0x0FF, (unsigned int)(result->ip_addr >> 16) & 0x0FF,
+			                           (unsigned int)(result->ip_addr >> 8) & 0x0FF, (unsigned int)(result->ip_addr >> 0) & 0x0FF);
+			cmd_scan(ip, "0");
+		}
+	} else {
+		cmd_scan(argv[1], argv[2]);
 	}
-	cmd_scan(argv[1], argv[2]);
+
 	return 0;
 }
 
