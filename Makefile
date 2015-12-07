@@ -3,7 +3,7 @@ SOURCES=\
 
 DEPS=\
 ./deps/hdhomerun/libhdhomerun.a \
-./deps/inih/inih.a \
+./deps/inih/libinih.a \
 
 
 DEPS_LDFLAGS= 
@@ -25,6 +25,7 @@ hdhomerunfs: hdhomerunfs.c $(OBJECTS) $(DEPS)
 channelscan: channelscan.c $(OBJECTS) $(DEPS)
 	$(CC) $< $(OBJECTS) -o $@ $(CFLAGS) $(LDFLAGS)
 
+.PHONY: clean
 clean:
 	$(RM) hdhomerunfs channelscan *.o deps/mmapring/*.o
 	$(MAKE) -C deps/hdhomerun clean
